@@ -1,15 +1,6 @@
 
 # 💳 Credit Card Fraud Detection using Machine Learning
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11-blue">
-  <img src="https://img.shields.io/badge/Streamlit-Web_App-red">
-  <img src="https://img.shields.io/badge/Scikit--Learn-Machine_Learning-orange">
-  <img src="https://img.shields.io/badge/Status-Deployed-success">
-</p>
-
----
-
 ## 📖 About the Project
 
 Credit Card Fraud Detection is a critical application of Machine Learning in the financial industry. With millions of transactions occurring daily, detecting fraudulent transactions quickly and accurately is essential to minimize financial losses.
@@ -400,30 +391,8 @@ streamlit run app.py
 
 ---
 
-# 🌍 Live Demo
-
-🔗 Streamlit App:
-
-https://credit-card-fraud-detection-iabdr35aqep7rutxosrj5g.streamlit.app/
-
----
-
-# 👨‍💻 Author
-
 ### Samson Barla
 
 B.Tech Mathematics & Computing
 
 Netaji Subhas University of Technology (NSUT)
-
-GitHub: https://github.com/samson1106
-
-LinkedIn: Add Your LinkedIn Profile Here
-
----
-
-# ⭐ Support
-
-If you found this project useful, please consider giving it a ⭐ on GitHub.
-
-It helps showcase the project and supports future improvements.
