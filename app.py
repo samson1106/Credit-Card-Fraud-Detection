@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import seaborn as sns
 import streamlit as st
 from imblearn.over_sampling import SMOTE
@@ -30,6 +31,11 @@ from sklearn.model_selection import (
 )
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
+
+try:
+    import shap
+except ImportError:
+    shap = None
 
 RANDOM_STATE = 42
 BASE_DIR = Path(__file__).resolve().parent
@@ -164,6 +170,157 @@ def get_feature_importance_df(
         }
     ).sort_values(by="Importance", ascending=False)
 
+def is_pca_pipeline(pipeline: ImbPipeline) -> bool:
+    return "pca" in pipeline.named_steps
+
+def supports_tree_importance(pipeline: ImbPipeline) -> bool:
+    model = pipeline.named_steps["model"]
+    return hasattr(model, "feature_importances_") and not is_pca_pipeline(pipeline)
+
+def get_explainability_feature_frame(results: dict, dataset: pd.DataFrame) -> pd.DataFrame:
+    feature_columns = results["test_samples"].drop(columns=["Actual Class"]).columns
+    if set(feature_columns).issubset(dataset.columns):
+        return dataset.loc[:, feature_columns].copy()
+    return results["test_samples"].drop(columns=["Actual Class"]).copy()
+
+def build_feature_importance_chart(
+    feature_importance_df: pd.DataFrame,
+    model_name: str,
+    top_n: int = 10,
+):
+    top_features = feature_importance_df.head(top_n).sort_values("Importance")
+    fig = px.bar(
+        top_features,
+        x="Importance",
+        y="Feature",
+        orientation="h",
+        title=f"{model_name}: Top {top_n} Feature Importance",
+        hover_data={
+            "Feature": True,
+            "Importance": ":.6f",
+        },
+        labels={
+            "Importance": "Model-specific importance score",
+            "Feature": "Feature",
+        },
+        color="Importance",
+        color_continuous_scale="Viridis",
+    )
+    fig.update_layout(
+        height=460,
+        margin=dict(l=10, r=10, t=55, b=20),
+        coloraxis_showscale=False,
+    )
+    return fig
+
+def compute_shap_values(pipeline: ImbPipeline, features: pd.DataFrame):
+    if shap is None:
+        return None, "SHAP is not installed in this environment."
+    if not supports_tree_importance(pipeline):
+        return None, "SHAP explanations are available here only for non-PCA tree-based models."
+
+    model = pipeline.named_steps["model"]
+    sample_size = min(len(features), 1000)
+    background = features.sample(sample_size, random_state=RANDOM_STATE)
+    try:
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(background)
+    except Exception as exc:
+        return None, f"SHAP could not explain this model: {exc}"
+
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    if getattr(shap_values, "ndim", 2) == 3:
+        shap_values = shap_values[:, :, -1]
+
+    return {"values": np.asarray(shap_values), "features": background}, None
+
+def build_shap_global_chart(shap_result: dict, model_name: str, top_n: int = 10):
+    shap_values = shap_result["values"]
+    features = shap_result["features"]
+    mean_abs = np.abs(shap_values).mean(axis=0)
+    shap_df = pd.DataFrame(
+        {"Feature": features.columns, "Mean |SHAP value|": mean_abs}
+    ).sort_values("Mean |SHAP value|", ascending=False)
+    top_features = shap_df.head(top_n).sort_values("Mean |SHAP value|")
+
+    fig = px.bar(
+        top_features,
+        x="Mean |SHAP value|",
+        y="Feature",
+        orientation="h",
+        title=f"{model_name}: Top {top_n} SHAP Drivers",
+        hover_data={"Feature": True, "Mean |SHAP value|": ":.6f"},
+        labels={"Mean |SHAP value|": "Mean absolute SHAP value"},
+        color="Mean |SHAP value|",
+        color_continuous_scale="Teal",
+    )
+    fig.update_layout(
+        height=460,
+        margin=dict(l=10, r=10, t=55, b=20),
+        coloraxis_showscale=False,
+    )
+    return fig, shap_df
+
+def build_local_shap_chart(
+    pipeline: ImbPipeline,
+    feature_row: pd.DataFrame,
+    model_name: str,
+    top_n: int = 10,
+):
+    if shap is None:
+        return None, "SHAP is not installed in this environment."
+    if not supports_tree_importance(pipeline):
+        return None, "Local SHAP explanations are available here only for non-PCA tree-based models."
+
+    model = pipeline.named_steps["model"]
+    try:
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(feature_row)
+    except Exception as exc:
+        return None, f"SHAP could not explain this transaction: {exc}"
+
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    shap_values = np.asarray(shap_values)
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, -1]
+    row_values = shap_values[0]
+
+    local_df = pd.DataFrame(
+        {
+            "Feature": feature_row.columns,
+            "SHAP value": row_values,
+            "Feature value": feature_row.iloc[0].values,
+            "Impact direction": np.where(row_values >= 0, "Increases fraud score", "Decreases fraud score"),
+        }
+    )
+    local_df["Absolute impact"] = local_df["SHAP value"].abs()
+    local_df = local_df.sort_values("Absolute impact", ascending=False)
+    chart_df = local_df.head(top_n).sort_values("Absolute impact")
+
+    fig = px.bar(
+        chart_df,
+        x="SHAP value",
+        y="Feature",
+        orientation="h",
+        title=f"{model_name}: Local SHAP Explanation",
+        hover_data={
+            "Feature": True,
+            "Feature value": ":.6f",
+            "SHAP value": ":.6f",
+            "Impact direction": True,
+            "Absolute impact": False,
+        },
+        color="Impact direction",
+        color_discrete_map={
+            "Increases fraud score": "#DD8452",
+            "Decreases fraud score": "#4C72B0",
+        },
+    )
+    fig.update_layout(height=460, margin=dict(l=10, r=10, t=55, b=20))
+    return fig, local_df
+
 def evaluate_model(
     model_name: str,
     pipeline: ImbPipeline,
@@ -285,6 +442,7 @@ def run_experiment(
         "cv_df": cv_df.reset_index(drop=True),
         "model_outputs": model_outputs,
         "feature_importance_df": feature_importance_df.reset_index(drop=True),
+        "train_samples": x_train.reset_index(drop=True),
         "test_samples": test_samples,
         "y_test": y_test.reset_index(drop=True),
         "tuning_summary": tuning_summary,
@@ -519,6 +677,124 @@ def page_manual_testing():
             st.pyplot(fig_explain)
 
 
+def page_model_explainability(dataset: pd.DataFrame):
+    st.header("Model Explainability")
+    results = st.session_state.get("results")
+    if not results:
+        st.warning("Please run the training pipeline first.")
+        return
+
+    st.write("Review global model drivers and transaction-level explanations for supported models.")
+
+    model_names = list(results["model_outputs"].keys())
+    selected_model = st.selectbox("Model", model_names, key="explainability_model")
+    selected_output = results["model_outputs"][selected_model]
+    pipeline = selected_output["pipeline"]
+    feature_importance_df = selected_output["feature_importance_df"]
+
+    if is_pca_pipeline(pipeline) or feature_importance_df is None:
+        st.subheader("Explanation Availability")
+        st.info(
+            "This chart is available only for tree-based models in the current app. "
+            "Logistic Regression and SVM use PCA-transformed features, so their scores "
+            "cannot be mapped back to the original columns with this simple explanation view."
+        )
+        return
+
+    with st.spinner("Preparing model explainability charts..."):
+        feature_frame = get_explainability_feature_frame(results, dataset)
+
+        st.subheader("Global Feature Importance")
+        st.caption(
+            "Scores are read from the fitted model's native feature importance values. "
+            "Higher scores indicate features used more heavily by this model."
+        )
+        st.plotly_chart(
+            build_feature_importance_chart(feature_importance_df, selected_model),
+            use_container_width=True,
+        )
+
+        top_10 = feature_importance_df.head(10).copy()
+        top_10.insert(0, "Rank", np.arange(1, len(top_10) + 1))
+        st.subheader("Top 10 Most Important Features")
+        st.dataframe(
+            top_10.style.format({"Importance": "{:.6f}"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("Complete Ranked Feature List"):
+            ranked_features = feature_importance_df.copy()
+            ranked_features.insert(0, "Rank", np.arange(1, len(ranked_features) + 1))
+            st.dataframe(
+                ranked_features.style.format({"Importance": "{:.6f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+    st.subheader("SHAP Explainability")
+    st.caption(
+        "SHAP estimates how features contribute to model output. It is shown only for supported "
+        "tree-based models and never used to change predictions."
+    )
+
+    shap_scope = st.radio(
+        "SHAP data source",
+        ["Uploaded/current dataset sample", "Training data", "Held-out test data"],
+        horizontal=True,
+    )
+    if shap_scope == "Uploaded/current dataset sample":
+        shap_features = feature_frame
+    elif shap_scope == "Training data":
+        shap_features = results.get(
+            "train_samples",
+            results["test_samples"].drop(columns=["Actual Class"]),
+        )
+    else:
+        shap_features = results["test_samples"].drop(columns=["Actual Class"])
+
+    with st.spinner("Computing global SHAP values..."):
+        shap_result, shap_error = compute_shap_values(pipeline, shap_features)
+
+    if shap_error:
+        st.info(shap_error)
+    else:
+        shap_fig, shap_df = build_shap_global_chart(shap_result, selected_model)
+        st.plotly_chart(shap_fig, use_container_width=True)
+        with st.expander("Complete SHAP Ranked Feature List"):
+            shap_ranked = shap_df.copy()
+            shap_ranked.insert(0, "Rank", np.arange(1, len(shap_ranked) + 1))
+            st.dataframe(
+                shap_ranked.style.format({"Mean |SHAP value|": "{:.6f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+    st.subheader("Local Transaction Explanation")
+    test_samples = results["test_samples"]
+    sample_index = st.slider(
+        "Select a held-out test transaction",
+        0,
+        len(test_samples) - 1,
+        0,
+        key="explainability_sample_index",
+    )
+    selected_row = test_samples.iloc[sample_index].copy()
+    actual_class = int(selected_row["Actual Class"])
+    feature_row = selected_row.drop(labels=["Actual Class"]).to_frame().T
+    prediction = int(pipeline.predict(feature_row)[0])
+    risk_score_value, risk_score_label = get_risk_score_details(pipeline, feature_row)
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Actual Class", "Fraud" if actual_class == 1 else "Legitimate")
+    metric_cols[1].metric("Model Verdict", "Fraud" if prediction == 1 else "Legitimate")
+    metric_cols[2].metric(risk_score_label, f"{risk_score_value:.2%}")
+    
+
+
+
 def page_admin_dashboard():
     st.header("🔄 Live Admin Dashboard & Simulation")
     results = st.session_state.get("results")
@@ -663,7 +939,7 @@ def main() -> None:
     st.set_page_config(page_title="Credit Card Intelligence", page_icon="💳", layout="wide")
     
     st.sidebar.title("💳 Navigation")
-    page = st.sidebar.radio("Go to", ["⚙️ Model Training", "🧪 Manual Testing Lab", "🔄 Admin Dashboard"])
+    page = st.sidebar.radio("Go to", ["Model Training", "Manual Testing Lab", "Model Explainability", "Admin Dashboard"])
 
     dataset_path = find_dataset_path()
 
@@ -710,14 +986,16 @@ def main() -> None:
             )
             st.code(traceback.format_exc())
 
-    if page == "⚙️ Model Training":
+    if page == "Model Training":
         st.title("Credit Card Fraud Models")
         st.write("Analyze dataset imbalance and train multiple machine learning models.")
         st.pyplot(plot_class_distribution(dataset))
         page_model_training()
-    elif page == "🧪 Manual Testing Lab":
+    elif page == "Manual Testing Lab":
         page_manual_testing()
-    elif page == "🔄 Admin Dashboard":
+    elif page == "Model Explainability":
+        page_model_explainability(dataset)
+    elif page == "Admin Dashboard":
         page_admin_dashboard()
 
 if __name__ == "__main__":
