@@ -390,9 +390,12 @@ streamlit run app.py
 ```
 
 ---
+## License
 
-### Samson Barla
+ ```text
+Samson Barla
 
 B.Tech Mathematics & Computing
 
 Netaji Subhas University of Technology (NSUT)
+```
